@@ -53,6 +53,42 @@ BITS_PER_PARAM = 32
 ALPHA_REG = 0.02
 ALPHA_LR = 0.1
 
+# p_average constants (from average.p_average in reference code)
+P_AVERAGE_G = 5.0       # softmax sharpness on Jaccard similarity
+P_AVERAGE_H = 0.7       # fraction of weight on other edges (1 - H goes to self)
+
+
+def p_average(edge_flats: torch.Tensor, g: float = P_AVERAGE_G, h: float = P_AVERAGE_H) -> torch.Tensor:
+    """Per-edge similarity-weighted cloud aggregation (paper's `p_average`).
+
+    For each edge e, produce a personalized cloud model:
+        cloud_e = (1 - h) * edge_e + h * sum_{k!=e} softmax(g * jaccard(edge_e, edge_k))[k] * edge_k
+    where jaccard(a, b) = <a, b> / (||a||^2 + ||b||^2 - <a, b>).
+    Defaults g=5, h=0.7 match `average.py::p_average` in the official repo.
+
+    Input  : edge_flats (M, n_par)
+    Output : cloud_flats (M, n_par) — one personalized cloud model per edge.
+    """
+    M = edge_flats.shape[0]
+    inner = edge_flats @ edge_flats.T                  # (M, M)
+    norm_sq = (edge_flats * edge_flats).sum(dim=1)     # (M,)
+    denom = norm_sq.unsqueeze(0) + norm_sq.unsqueeze(1) - inner
+    denom = torch.clamp(denom, min=1e-12)              # avoid /0 (defensive)
+    sim = inner / denom                                 # Jaccard (Tanimoto) similarity
+    # Mask self in softmax: set diag to -inf so softmax row puts 0 mass there.
+    sim_g = g * sim
+    sim_g = sim_g.masked_fill(torch.eye(M, dtype=torch.bool), float("-inf"))
+    weights_off = torch.softmax(sim_g, dim=1) * h
+    weights = weights_off + torch.eye(M, dtype=edge_flats.dtype) * (1.0 - h)
+    cloud_flats = weights @ edge_flats                  # (M, n_par)
+    # Defensive NaN scrub: if any row is non-finite (e.g. all-zero edges),
+    # fall back to the uniform mean of all edges.
+    bad = ~torch.isfinite(cloud_flats).all(dim=1)
+    if bad.any():
+        fallback = edge_flats.mean(dim=0)
+        cloud_flats[bad] = fallback
+    return cloud_flats
+
 
 # ---------------------------------------------------------------------------
 # Data / partition  (shared with MTGC and HierFAVG)
@@ -311,15 +347,18 @@ def main() -> None:
     dominant_class = label_matrix.argmax(axis=1).tolist()
 
     # ---- Models + state ----------------------------------------------------
-    # Cloud state: W_global (one flat tensor).
-    # Edge state (persists across global rounds): W_j (synced from cloud each round),
-    #                                             V_j, m_j (NEVER touched by cloud).
+    # Cloud aggregation = p_average (per-edge similarity-weighted) -> M cloud
+    # models, one per edge. NOT a single global. We still track a reference
+    # global = weighted mean of edges, used only for the `global_acc` column.
+    # Edge state persists: V_j, m_j never touched by the cloud.
     avg_model = Cifar10CNN().to(device)
     n_par = num_params(avg_model)
     print(f"[esperhfl] model params={n_par:,}  (per client: 2x w+v = {2*n_par:,})")
-    W_global = get_flat_params(avg_model)
-    V_edges = W_global.unsqueeze(0).expand(args.num_edges, -1).clone()  # same init as W for all edges
+    init_flat = get_flat_params(avg_model)
+    W_cloud = init_flat.unsqueeze(0).expand(args.num_edges, -1).clone()   # per-edge personalized cloud
+    V_edges = init_flat.unsqueeze(0).expand(args.num_edges, -1).clone()   # same init for all edges
     m_edges = torch.full((args.num_edges,), float(args.init_mix), dtype=torch.float32)
+    W_global_ref = init_flat.clone()                                       # for reporting only
 
     samples_per_client = float(np.mean(client_sizes))
     n_iter_per_epoch = int(np.ceil(samples_per_client / args.batch_size))
@@ -351,10 +390,12 @@ def main() -> None:
         "hyperparameters": vars(args),
         "n_par": n_par,
         "n_minibatch": n_minibatch,
-        "aggregation": "weighted_by_sample_count",
+        "aggregation": "edge=weighted_by_sample_count; cloud=p_average (paper-faithful)",
         "personalization": {"per_edge_v_model": True, "per_edge_mix_scalar": True,
                             "alpha_update_lr": ALPHA_LR, "alpha_update_reg": ALPHA_REG,
-                            "init_mix": args.init_mix},
+                            "init_mix": args.init_mix,
+                            "p_average_g": P_AVERAGE_G, "p_average_h": P_AVERAGE_H,
+                            "cloud_model_count": args.num_edges},
         "hardware": {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -396,13 +437,14 @@ def main() -> None:
         for j in range(args.num_edges):
             members = [c for c in range(n_clients) if client_to_edge[c] == j]
             if not members:
-                new_W_edges[j] = W_global
+                new_W_edges[j] = W_cloud[j]
                 continue
             members_sizes = client_sizes[members]
             members_total = float(members_sizes.sum())
 
-            # Edge syncs W with cloud each global round; V_j and m_j persist.
-            W_j = W_global.clone()
+            # Each edge starts from its OWN personalized cloud model (p_average output).
+            # V_j and m_j persist across rounds at the edge.
+            W_j = W_cloud[j].clone()
             V_j = V_edges[j].clone()
             m_j = float(m_edges[j].item())
 
@@ -433,20 +475,22 @@ def main() -> None:
             V_edges[j] = V_j
             m_edges[j] = m_j
 
-        # Cloud aggregation: weighted by edge sample count, on W only.
+        # Cloud aggregation: PAPER-FAITHFUL p_average -> M personalized clouds.
+        W_cloud = p_average(new_W_edges)                       # (M, n_par)
+        # Reference uniform-weighted global, ONLY for the `global_acc` report column.
         edge_weights = torch.tensor(edge_sizes / total_size, dtype=torch.float32).unsqueeze(1)
-        W_global = (new_W_edges * edge_weights).sum(dim=0)
-        set_flat_params(avg_model, W_global)
+        W_global_ref = (new_W_edges * edge_weights).sum(dim=0)
+        set_flat_params(avg_model, W_global_ref)
 
         wall = time.time() - round_start
         if (t + 1) % args.eval_every == 0 or t == args.global_rounds - 1:
             per_edge_accs, per_edge_losses, per_edge_pers_accs = [], [], []
             for j in range(args.num_edges):
-                # Global model on edge's local test
+                # Reference global model on edge's local test (for cross-baseline comparability)
                 loss_j, acc_j, _ = evaluate(avg_model, edge_test_loaders[j], device)
                 per_edge_accs.append(acc_j); per_edge_losses.append(loss_j)
-                # Served (mixed) model on edge's local test
-                set_flat_params(work_w, W_global)
+                # Served (mixed) model on edge's local test: m_j * V_j + (1-m_j) * cloud_j
+                set_flat_params(work_w, W_cloud[j])
                 set_flat_params(work_v, V_edges[j])
                 _, acc_p, _ = evaluate_mixed(work_w, work_v, float(m_edges[j].item()),
                                              edge_test_loaders[j], device)
@@ -485,7 +529,7 @@ def main() -> None:
         # local_test_acc = served (personalized) model on edge's local test slice
         # global_test_acc = served (personalized) model on full 10k test set
         for j in range(args.num_edges):
-            set_flat_params(work_w, W_global)
+            set_flat_params(work_w, W_cloud[j])
             set_flat_params(work_v, V_edges[j])
             m_j = float(m_edges[j].item())
             loss_j, acc_j, _ = evaluate_mixed(work_w, work_v, m_j, edge_test_loaders[j], device)
@@ -498,22 +542,23 @@ def main() -> None:
                 f"{m_j:.6f}",
             ])
 
-    # Save the cloud's global model + each edge's served (personalized) state
+    # Save: reference global (uniform-weighted across edges), M personalized
+    # cloud models from p_average, and each edge's served state (the actual
+    # personalized model it serves to its clients).
     torch.save(avg_model.state_dict(), out_dir / "models" / "global.pt")
     for j in range(args.num_edges):
-        set_flat_params(work_w, W_global)
-        set_flat_params(work_v, V_edges[j])
+        set_flat_params(served_model, W_cloud[j])
+        torch.save(served_model.state_dict(), out_dir / "models" / f"cloud_{j}.pt")
         m_j = float(m_edges[j].item())
-        # Built served model = m_j * V_j + (1 - m_j) * W_global (param-space mix)
-        served_flat = m_j * V_edges[j] + (1.0 - m_j) * W_global
+        # Served model = m_j * V_j + (1 - m_j) * W_cloud[j]  (param-space mix)
+        served_flat = m_j * V_edges[j] + (1.0 - m_j) * W_cloud[j]
         set_flat_params(served_model, served_flat)
         torch.save({
             "state_dict": served_model.state_dict(),
             "mix_scalar": m_j,
             "edge_id": j,
-            "components": {"V_j": V_edges[j].tolist().__len__(),  # just shape marker
-                           "W_global": W_global.tolist().__len__()},
-            "note": "Served model = m_j * V_j + (1 - m_j) * W_global (parameter-space mix).",
+            "note": "Served model = m_j * V_j + (1 - m_j) * W_cloud[j] "
+                    "(p_average's per-edge personalized cloud).",
         }, out_dir / "models" / f"edge_{j}.pt")
 
     g_loss_final, g_acc_final, _ = evaluate(avg_model, global_test_loader, device)

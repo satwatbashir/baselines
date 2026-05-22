@@ -7,7 +7,8 @@ Official code: [github.com/xiangqianL/ESPerHFL](https://github.com/xiangqianL/ES
 
 ## What it is
 Per-edge personalization via APFL-style learnable mixing extended to a
-three-tier hierarchy.
+three-tier hierarchy. Two-level personalization: (i) client-side learnable
+mixing scalar, (ii) cloud-side similarity-weighted per-edge aggregation.
 
 Per client `c` in edge `j` we keep two models and a scalar:
 - `w_c` — shared/global path
@@ -24,10 +25,13 @@ Per local SGD step on `(x, y)`:
 Aggregation:
 - **Edge** `j`: weighted mean of `w_c` → `W_j`; weighted mean of `v_c` → `V_j`;
   uniform mean of `m_c` → `m_j`. Weights are by sample count.
-- **Cloud**: weighted mean of `W_j` → `W_global`. **`V_j` and `m_j` STAY at
-  the edge** — that's the personalization.
+- **Cloud (paper-faithful `p_average`)**: similarity-weighted per-edge
+  aggregation. For each edge `e`,
+  `W_cloud[e] = (1 − h) · W_e + h · Σ_{k≠e} softmax(g · jaccard(W_e, W_k))[k] · W_k`
+  with `g = 5`, `h = 0.7`. Produces **M distinct cloud models**, one per
+  edge. `V_j` and `m_j` STAY at the edge.
 
-**Served model at edge j** = `m_j · V_j + (1 − m_j) · W_global` (parameter-space mix).
+**Served model at edge j** = `m_j · V_j + (1 − m_j) · W_cloud[j]` (parameter-space mix).
 
 ## Setup in this folder
 Identical to MTGC and HierFAVG for direct comparability:
@@ -44,14 +48,15 @@ ESPerHFL is the first personalized baseline, so `per_edge_pers_accs` now
 
 | Column | Meaning here |
 |---|---|
-| `per_edge_accs[j]` | `W_global` evaluated on edge j's local test partition |
-| `per_edge_pers_accs[j]` | **Served (mixed) model** at edge j on edge j's local test |
+| `per_edge_accs[j]` | Reference **uniform-weighted global** evaluated on edge j's local test (kept for cross-baseline comparison) |
+| `per_edge_pers_accs[j]` | **Served (mixed) model** at edge j: `m_j · V_j + (1−m_j) · W_cloud[j]` |
 | `mix_mean / min / max` | Diagnostics on the per-edge `m_j` distribution (ESPerHFL-only columns) |
 | `final_per_edge_acc.csv → local_test_acc` | Served model on edge's local test |
 | `final_per_edge_acc.csv → global_test_acc` | Served model on full 10k test (differs per row) |
 | `final_per_edge_acc.csv → mix_scalar` | Final `m_j` per edge |
 | `models/edge_{j}.pt` | The **served** state dict (parameter-space mix), plus `mix_scalar` metadata |
-| `models/global.pt` | The cloud's `W_global` |
+| `models/cloud_{j}.pt` | The per-edge `W_cloud[j]` from `p_average` (one per edge) |
+| `models/global.pt` | Reference uniform-weighted global (used for `global_acc` reporting only) |
 
 ## Run
 ```bash
@@ -61,9 +66,20 @@ python3 train_esperhfl.py --global-rounds 100 --seed 42
 bash run_5_seeds.sh
 ```
 
+## Deviations from the reference repo (documented)
+1. **Optimizer momentum.** Reference SGD uses `momentum = args.momentum`
+   (default 0.9). For cross-baseline consistency with MTGC / HierFAVG / CHPFL
+   in this chapter (which all use no momentum), this implementation uses
+   `momentum = 0`. The `--lr` and `--weight-decay` defaults match the paper.
+2. **Partition.** Reference uses hard-coded label-range partitions
+   (`initialize_edges_niid`); this chapter uses two-level hierarchical
+   Dirichlet (`α_server = α_client = 0.1`) shared across all baselines so
+   partition determinism is verifiable across methods.
+
 ## NaN guards
 - `alpha_update` clips the new mixing scalar to `[0, 1]` and falls back to the
   previous value if the update is NaN/Inf or if either model has no `.grad`.
-- `evaluate()` returns `NaN` only for empty loaders (never observed under
-  full participation at α=0.1; defensive only).
+- `evaluate()` returns `NaN` only for empty loaders (defensive).
+- `p_average` clamps the Jaccard denominator at 1e-12 and falls back to the
+  uniform mean for any edge row whose cloud aggregation came out non-finite.
 - Gradient norm is clipped at `clip_norm=10` on both `w` and `v` updates.
