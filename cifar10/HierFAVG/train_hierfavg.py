@@ -181,8 +181,10 @@ def main() -> None:
                    help="Output directory. Default: ../gc_results/hierfavg_seed{seed}/")
     p.add_argument("--num-edges", type=int, default=10)
     p.add_argument("--clients-per-edge", type=int, default=10)
-    p.add_argument("--alpha-server", type=float, default=0.5)
-    p.add_argument("--alpha-client", type=float, default=0.5)
+    p.add_argument("--alpha-server", type=float, default=0.1,
+                   help="Outer Dirichlet concentration (severe non-IID = 0.1).")
+    p.add_argument("--alpha-client", type=float, default=0.1,
+                   help="Inner Dirichlet concentration (severe non-IID = 0.1).")
     p.add_argument("--participation", type=float, default=1.0)
     p.add_argument("--global-rounds", type=int, default=100)
     p.add_argument("--edge-rounds", type=int, default=1, help="kappa_1 in the paper")

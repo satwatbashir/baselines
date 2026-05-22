@@ -3,7 +3,11 @@
 Six baselines compared against the proposed Fedge method on CIFAR-10 and
 Fashion-MNIST, all using the same hierarchical setup:
 **10 edges × 10 clients = 100 clients, full participation,
-α_server = α_client = 0.5 (two-level Dirichlet).**
+α_server = α_client = 0.1 (two-level Dirichlet, severe non-IID).**
+
+At α=0.1, ~37% of the (edge × class) cells contain zero training samples
+and per-edge training sizes span ~1k–9k — designed to stress every method,
+especially the personalized ones.
 
 | Baseline | Paper | Type | Distinct trained models |
 |---|---|---|---|
