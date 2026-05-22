@@ -14,9 +14,10 @@ venv/
 **/data/FashionMNIST/
 **/data/MNIST/
 
-# Run outputs (these are produced by training, not source)
-**/gc_results/*/models/
+# Run outputs (produced by training; not source). Keep the .gitkeep stubs.
+**/gc_results/*/
 **/gc_results/*.log
+**/gc_results/*.zip
 *.pt
 
 # OS / editor
