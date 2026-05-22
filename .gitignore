@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.env
+
+# CIFAR-10 / Fashion-MNIST downloads
+**/data/cifar-10-batches-py/
+**/data/cifar-10-python.tar.gz
+**/data/FashionMNIST/
+**/data/MNIST/
+
+# Run outputs (these are produced by training, not source)
+**/gc_results/*/models/
+**/gc_results/*.log
+*.pt
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
