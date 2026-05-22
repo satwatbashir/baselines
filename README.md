@@ -34,12 +34,26 @@ Per baseline a run produces `{method}_seed{N}/` containing:
 
 ## Quick start
 
+### Local
 ```bash
-# Local
 cd cifar10/MTGC
 pip install -r ../../requirements.txt
 python train_mtgc.py --global-rounds 2     # smoke test
 bash run_5_seeds.sh --global-rounds 100    # full 5-seed sweep
+```
+
+### Fresh GCP VM (g2-standard-8 + 1× L4, Ubuntu 22.04)
+```bash
+# On the VM:
+git clone https://github.com/satwatbashir/baselines.git
+cd baselines
+bash setup_vm.sh                  # installs driver, reboots
+# log back in, then:
+bash setup_vm.sh --skip-driver    # installs Python deps in .venv
+source ~/baselines/.venv/bin/activate
+cd cifar10/MTGC
+tmux new -s mtgc
+bash run_5_seeds.sh               # ~30-50 min on L4
 ```
 
 After the sweep, results are under `cifar10/gc_results/mtgc_seed{42..46}/`.
