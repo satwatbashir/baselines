@@ -196,7 +196,7 @@ def main() -> None:
     p.add_argument("--weight-decay", type=float, default=1e-3)
     p.add_argument("--clip-norm", type=float, default=10.0)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--num-workers", type=int, default=2,
+    p.add_argument("--num-workers", type=int, default=4,
                    help="DataLoader workers per client. 2 is a good default on "
                         "g2-standard-8 (8 vCPU). Use 0 for deterministic "
                         "augmentation orderings on CPU smoke tests.")

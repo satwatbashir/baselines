@@ -8,7 +8,12 @@ cd "$(dirname "$0")"
 PYTHON=${PYTHON:-python3}
 SEEDS=${SEEDS:-"42 43 44 45 46"}
 
-GC_RESULTS_DIR="$(realpath ../gc_results)"
+EXPERIMENT_TAG=${EXPERIMENT_TAG:-""}    # e.g. "alpha01" or "alpha05"; empty = legacy flat layout
+if [ -n "$EXPERIMENT_TAG" ]; then
+    GC_RESULTS_DIR="$(realpath ../gc_results)/${EXPERIMENT_TAG}"
+else
+    GC_RESULTS_DIR="$(realpath ../gc_results)"
+fi
 mkdir -p "$GC_RESULTS_DIR"
 
 echo "[run_5_seeds] python=$PYTHON   seeds=$SEEDS"

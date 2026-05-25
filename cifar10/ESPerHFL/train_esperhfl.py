@@ -290,7 +290,7 @@ def main() -> None:
     p.add_argument("--init-mix", type=float, default=0.5,
                    help="Initial value of the per-edge mixing scalar m_j (paper uses 0.5).")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--num-workers", type=int, default=2,
+    p.add_argument("--num-workers", type=int, default=4,
                    help="DataLoader workers per client. 2 is a good default on "
                         "g2-standard-8 (8 vCPU). Use 0 for deterministic "
                         "augmentation orderings on CPU smoke tests.")
