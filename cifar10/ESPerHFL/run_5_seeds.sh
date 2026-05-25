@@ -28,7 +28,7 @@ for SEED in $SEEDS; do
     echo "[run_5_seeds] seed=$SEED  out=$OUT"
     echo "============================================================"
     START=$(date +%s)
-    "$PYTHON" train_esperhfl.py --seed "$SEED" --out-dir "$OUT" "$@" 2>&1 | tee "$LOG"
+    "$PYTHON" -u train_esperhfl.py --seed "$SEED" --out-dir "$OUT" "$@" 2>&1 | tee "$LOG"
     END=$(date +%s)
     echo "[run_5_seeds] seed=$SEED done in $((END-START))s"
     echo
