@@ -204,7 +204,7 @@ def main() -> None:
     p.add_argument("--alpha-client", type=float, default=0.1,
                    help="Inner Dirichlet concentration (severe non-IID = 0.1).")
     p.add_argument("--participation", type=float, default=1.0)
-    p.add_argument("--global-rounds", type=int, default=100)
+    p.add_argument("--global-rounds", type=int, default=200)
     p.add_argument("--edge-rounds", type=int, default=1)
     p.add_argument("--local-epochs", type=float, default=1.0)
     p.add_argument("--batch-size", type=int, default=50)
