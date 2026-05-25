@@ -1,0 +1,538 @@
+% =====================================================================
+% Chapter 3 - Fedge: A Bayesian Non-Parametric Hierarchical Federated
+%             Learning Framework
+%
+% Sections 3.1, 3.2, 3.3 (drop-in replacement)
+%
+% Revision applied (per user feedback):
+%   1. "Trilemma" replaced with "three-way trade-off" in formal use;
+%      one informal use retained in the opening paragraph only.
+%   2. Algorithmic summary replaced with formal pseudocode using
+%      algorithm + algpseudocode packages.
+%   3. "Birth and merge" replaced with "split-merge" throughout, matching
+%      Jain and Neal (2004) and DPMM-CFL terminology.
+%   4. "Soft membership" retained (standard term in mixture-model and
+%      federated-clustering literature) and defined explicitly on first use.
+%   5. "FedAvg" replaced by "HierFAVG" where the hierarchical baseline is meant;
+%      communication discussion rewritten to refer to client--edge and edge--cloud
+%      steps explicitly rather than to a single "cloud round" transmission.
+%   Voice pass: passive throughout for methodology, no emotive words,
+%   no synonyms for locked terms (Fedge, K^t, family, split-merge,
+%   soft membership, sensitivity parameter lambda, three-way trade-off).
+%
+% Required LaTeX packages (add to thesis preamble if absent):
+%   \usepackage{algorithm}
+%   \usepackage{algpseudocode}
+% =====================================================================
+
+\chapter{Fedge: A Bayesian Non-Parametric Hierarchical Federated Learning Framework}
+\label{ch:fedge}
+
+This chapter proposes Fedge, a hierarchical federated learning (HFL) framework in which the cloud server maintains a variable family of global models rather than a single shared model. The number of models in the family, the assignment of edges to models, and the aggregation operation at each tier are inferred jointly during training under a Bayesian non-parametric prior. The contribution of this chapter is twofold. The first is the framework itself, which subsumes the canonical single-model HFL of HierFAVG \cite{liu2020hierfavg} and the per-edge personalised HFL of PHE-FL \cite{lee2025phefl} and ESPerHFL \cite{ma2024personalized} as boundary cases. The second is the Fedge algorithm, an inference-and-optimisation procedure that drives the variable family using two-level heterogeneity signals and produces a soft assignment between edges and cloud-tier models. The framework is positioned by an explicit three-way trade-off between personalisation, convergence, and participation robustness, informally referred to as the personalisation--convergence--robustness (P--C--R) trilemma, and is exposed to the operator through a single sensitivity parameter that traces a continuous path through the trade-off frontier. To the best of the author's knowledge, the combination of Dirichlet Process inference over a cloud-tier model family, soft edge-to-model membership, two-level heterogeneity signals at the client--edge and edge--cloud tiers, and explicit handling of partial participation has not previously been studied in the three-tier hierarchical federated learning setting.
+
+%----------------------------------------------------------------------
+\section{System Model and the Three-Way Trade-off}
+\label{sec:fedge-system}
+
+This section establishes the system model used throughout the chapter and introduces the analytical lens through which the contribution is positioned. The setting is the standard three-tier client--edge--cloud hierarchy of \cite{liu2020hierfavg}, extended with an explicit two-level heterogeneity model and a partial-participation assumption that matches realistic edge-IoT deployments.
+
+\subsection{Three-Tier Hierarchical Setting}
+\label{subsec:fedge-tiers}
+
+Let $\mathcal{E} = \{1, 2, \ldots, M\}$ denote the set of edge servers and $\mathcal{C}_e = \{c_{e,1}, \ldots, c_{e,|\mathcal{C}_e|}\}$ the set of clients served by edge $e$. Edge sets are disjoint, so the total number of clients is $N = \sum_{e=1}^{M} |\mathcal{C}_e|$. Each client $i$ holds a private local dataset $\mathcal{D}_i$ of size $D_i$. A single cloud server orchestrates the topmost aggregation step. Training proceeds over $T$ cloud rounds. Within each cloud round, each participating edge runs $E$ edge aggregation periods, and within each edge aggregation period, each participating client performs $\tau$ local stochastic gradient descent (SGD) steps. The aggregation schedule is fixed in this chapter; adaptive scheduling is addressed in Chapter~4.
+
+\subsection{Two-Level Non-IID Heterogeneity Model}
+\label{subsec:fedge-noniid}
+
+Data heterogeneity in HFL operates at two levels simultaneously, as observed by \cite{lee2025phefl} and quantified formally by \cite{fang2024hierarchical}. The first level captures heterogeneity between edges: the marginal label distribution at one edge differs from that at another. The second level captures heterogeneity within an edge: the marginal label distributions of the clients under the same edge differ from each other.
+
+Both levels are parameterised by independent Dirichlet partitions following the protocol of \cite{hsu2019measuring}. The global dataset is first partitioned across the $M$ edges using $\text{Dir}(\alpha_{\text{edge}})$, producing inter-edge skew controlled by $\alpha_{\text{edge}}$. Within each edge $e$, the data assigned to that edge is then partitioned across $\mathcal{C}_e$ using $\text{Dir}(\alpha_{\text{client}})$, producing intra-edge skew controlled by $\alpha_{\text{client}}$. Small values of either parameter produce strong skew at the corresponding level.
+
+Two scalar quantities appear in standard HFL convergence bounds. The intra-edge gradient dissimilarity at edge $e$ is defined as
+\begin{equation}
+\label{eq:zeta-intra}
+\zeta_{\text{intra}}^{2}(e) = \frac{1}{|\mathcal{C}_e|} \sum_{i \in \mathcal{C}_e} \big\| \nabla F_i(w) - \nabla F_e(w) \big\|^{2},
+\end{equation}
+and the inter-edge gradient dissimilarity is defined as
+\begin{equation}
+\label{eq:zeta-inter}
+\zeta_{\text{inter}}^{2} = \frac{1}{M} \sum_{e=1}^{M} \big\| \nabla F_e(w) - \nabla F(w) \big\|^{2},
+\end{equation}
+where $F_i$, $F_e$, and $F$ denote the local, edge, and global loss respectively. A standard HierFAVG-style convergence bound contains the sum of these two terms, and any algorithm that aims to tighten the bound under non-IID data must address both levels \cite{fang2024hierarchical, jiang2024partial}.
+
+\subsection{Partial Participation Model}
+\label{subsec:fedge-participation}
+
+At cloud round $t$, only a subset of clients at each edge participate. Let $\mathcal{S}_e^t \subseteq \mathcal{C}_e$ denote the set of participating clients at edge $e$ in round $t$, with per-edge participation rate $\rho_e^t = |\mathcal{S}_e^t| / |\mathcal{C}_e|$. The participation rate is permitted to vary across edges and across rounds, reflecting the intermittent device availability that characterises edge-IoT deployments \cite{kairouz2021advances}. Full participation, $\rho_e^t = 1$ for all $e$ and $t$, is treated as a special case rather than as the default. Most personalisation-focused HFL works \cite{ma2024personalized, lee2025phefl} are evaluated under full participation only; one design requirement of the framework introduced in this chapter is that the algorithm and its analysis remain valid as $\rho_e^t$ decreases.
+
+\subsection{The Three-Way Trade-off between Personalisation, Convergence, and Robustness}
+\label{subsec:fedge-tradeoff}
+
+In the three-tier HFL setting under two-level non-IID data and partial participation, three competing objectives arise. Each can be optimised in isolation, but no aggregation rule can maximise all three simultaneously. This subsection names the three objectives and characterises the tension between each pair. The trade-off is presented qualitatively here; the algorithm developed in Sections~\ref{sec:fedge-framework} and \ref{sec:fedge-algorithm} is designed to expose a single parameter that allows an operator to position the system at any point of the trade-off frontier.
+
+\paragraph{The three objectives.}
+The first objective is \emph{personalisation depth} ($P$), defined as the average pairwise distance between cloud-tier output models. A scheme that produces one global model has $P = 0$. A scheme that produces a distinct model per edge has the highest value of $P$. The second objective is \emph{convergence guarantee tightness} ($C$), defined as the inverse of the dependence of the convergence bound on the two-level heterogeneity terms $\zeta_{\text{intra}}^{2}$ and $\zeta_{\text{inter}}^{2}$. A heterogeneity-immune bound, as derived by \cite{fang2024hierarchical}, provides the maximum value of $C$. The third objective is \emph{participation robustness} ($R$), defined as the inverse of the degradation in final-round accuracy as $\rho_e^t$ decreases from full participation to a deployment-relevant minimum.
+
+\paragraph{Pairwise tensions.}
+Each pair of objectives admits a structural tension, illustrated in Figure~\ref{fig:tradeoff}. Stronger personalisation increases the effective heterogeneity that each per-cluster model encounters during aggregation, which loosens the convergence bound; this is the $P$-versus-$C$ tension. Tight convergence under non-IID data is achieved by drift-correction mechanisms such as control variates or proximal terms; the original SCAFFOLD analysis \cite{karimireddy2020scaffold} proved robustness to client sampling under the assumption of unbiased, uniformly distributed participation. Subsequent work has shown that this assumption fails in realistic deployments: under cyclic or non-uniform participation, control variates become stale and biased between rounds, raising the communication-round complexity from $\mathcal{O}(\epsilon^{-2})$ to $\mathcal{O}(\kappa^{2} \epsilon^{-4})$, where $\kappa$ denotes the data heterogeneity \cite{crawshaw2024periodic}. A separate analysis has further shown that the SCAFFOLD bias does not decrease with the number of clients, breaking the linear-speedup property that motivates the algorithm \cite{mangold2025scaffold}. This is the $C$-versus-$R$ tension: the mechanisms required to tighten the convergence bound become themselves a source of bias once participation is intermittent. Strong personalisation requires each per-edge model to be trained on enough signal, and when the cloud maintains multiple distinct models, each model receives on average only a fraction of the available participating clients per round; lower participation rates therefore amplify the variance of each model. This last is the $P$-versus-$R$ tension.
+
+\paragraph{Boundary cases.}
+Each canonical HFL approach occupies a corner of the three-way trade-off, with a specific limitation that prevents it from occupying the interior. HierFAVG \cite{liu2020hierfavg} and MTGC \cite{fang2024hierarchical} produce a single global model and therefore have $P = 0$. MTGC achieves a heterogeneity-immune convergence bound, but requires per-client and per-edge control variates to be stored and updated statefully across rounds, an assumption that conflicts with the cross-device federated learning setting in which clients are stateless and may not participate consecutively \cite{kairouz2021advances}. PHE-FL \cite{lee2025phefl} and ESPerHFL \cite{ma2024personalized} produce one model per edge and therefore have maximal $P$; both are evaluated under full participation only, and both fix the cluster count at $K = M$ by construction, providing no mechanism for two near-identical edges to share a model. CHPFL \cite{song2025chpfl} and CFLHKD \cite{ahmad2025cflhkd} occupy points between the two corners through clustering: CHPFL uses K-Means++ with $K$ supplied as a hyperparameter, and CFLHKD adopts bi-level aggregation between cluster and cloud with $K$ similarly fixed by the operator and clustering driven by heuristic information-theoretic metrics. HPFL \cite{you2023hpfl} addresses the three-tier setting but with a fixed clustering structure determined offline and a semi-asynchronous schedule optimised for latency rather than for two-level heterogeneity. None of these methods infers the cluster count from data during training, and none uses two-level heterogeneity signals to drive split and merge decisions.
+
+\begin{figure}[!t]
+\centering
+% \includegraphics[width=0.7\linewidth]{figures/tradeoff.pdf}
+\fbox{\parbox{0.7\linewidth}{\centering Figure 3.1 placeholder. Three-way trade-off triangle (see \texttt{CAT.jpg}, with labels updated as described in the chapter notes).}}
+\caption[The three-way trade-off in hierarchical federated learning]{The three-way trade-off between personalisation, convergence, and robustness. Each vertex represents a single objective; each edge represents the tension between two objectives. No HFL aggregation rule can simultaneously occupy all three vertices.}
+\label{fig:tradeoff}
+\end{figure}
+
+\subsection{Output Specification}
+\label{subsec:fedge-output}
+
+A training algorithm in this setting produces, at the end of round $T$, a set of cloud-tier models $\{w_{1}^{T}, w_{2}^{T}, \ldots, w_{K^{T}}^{T}\}$, where $K^T$ is the number of distinct models maintained. Three regimes are distinguished. The \emph{global regime} has $K = 1$ throughout training and is the regime of HierFAVG, HierMo \cite{yang2023hiermo}, MTGC, and the partial-participation analysis of \cite{jiang2024partial}. The \emph{fully personalised regime} has $K = M$ throughout training and is the regime of PHE-FL and ESPerHFL. The \emph{variable regime}, in which $1 \leq K^t \leq M$ is determined adaptively during training, is the regime targeted by the present chapter. No prior HFL work occupies this regime with a Bayesian non-parametric formulation, soft edge-to-model assignment, and explicit handling of partial participation.
+
+%----------------------------------------------------------------------
+\section{The Fedge Framework}
+\label{sec:fedge-framework}
+
+This section introduces the Fedge framework. The framework is a formulation rather than an algorithm: it specifies what the cloud tier maintains, what the aggregation operation produces, and what stochastic structure governs the family of cloud-tier models. The algorithm that realises this framework is presented in Section~\ref{sec:fedge-algorithm}.
+
+\subsection{The Variable Cloud-Tier Model Family}
+\label{subsec:fedge-family}
+
+At cloud round $t$, the cloud server maintains a finite collection of global models
+\begin{equation}
+\label{eq:fedge-family}
+\mathcal{W}^t = \big\{ w_{1}^{t}, w_{2}^{t}, \ldots, w_{K^{t}}^{t} \big\},
+\end{equation}
+where the cardinality $K^t$ is a random variable inferred from the data rather than a hyperparameter. Each $w_{k}^{t}$ is a complete model of the same dimensionality as a single HierFAVG global model; the framework does not address model heterogeneity across $k$. The collection $\mathcal{W}^t$ is referred to throughout the chapter as the \emph{Fedge family}. The framework name reflects this: Fedge denotes the family of cloud-tier global models that coexist, are created, and are merged in response to changes in the distribution of data across edges.
+
+The architecture is illustrated in Figure~\ref{fig:architecture}. Edge servers receive blended models from the cloud, perform edge-tier aggregation across their participating clients, and return updated models to the cloud, which then revises both the family $\mathcal{W}^t$ and the assignment of edges to family members.
+
+\begin{figure}[!t]
+\centering
+% \includegraphics[width=0.85\linewidth]{figures/architecture.pdf}
+\fbox{\parbox{0.85\linewidth}{\centering Figure 3.2 placeholder. Three-tier Fedge architecture (see \texttt{fedgearchitecture.jpg}, redrawn to show $K^t$ cloud-tier models with $\Pi^t$ blending arrows to edges).}}
+\caption[The Fedge architecture]{The three-tier Fedge architecture. The cloud maintains the variable family $\mathcal{W}^t$ of $K^t$ global models. Each edge $e$ receives a blended model $\tilde{w}_e^t = \sum_k \Pi_{e,k}^t w_k^t$ governed by the soft membership matrix $\Pi^t$. Clients train locally using SGD and return updates to the edge.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Dirichlet Process Prior over the Family}
+\label{subsec:fedge-dp}
+
+The variability of $K^t$ is governed by a Dirichlet Process prior over the parameters of the family members, following the standard non-parametric clustering construction of \cite{ferguson1973bayesian} and its federated adaptation in flat topology by \cite{jaramillo2026dpmmcfl}. The generative model at round $t$ is
+\begin{align}
+\label{eq:dp-prior}
+G &\sim \text{DP}(\alpha_0(\lambda), G_0), \\
+\theta_e &\sim G, \quad e = 1, \ldots, M, \\
+w_k^t \mid \theta_e = \theta_k &\sim p\big(w_k^t \mid \theta_k\big),
+\end{align}
+where $G$ is a discrete random measure drawn from a Dirichlet Process with concentration parameter $\alpha_0(\lambda)$ and base measure $G_0$, and $\theta_e$ is the latent cluster parameter for edge $e$. The Dirichlet Process induces a partition of the $M$ edges into $K^t \leq M$ distinct clusters, with $K^t$ a posterior quantity inferred from data rather than fixed in advance. The number of clusters under the Dirichlet Process prior follows the stick-breaking process and is observed empirically to stabilise within a small number of rounds, a property exploited in the convergence analysis of Section~\ref{subsec:fedge-stab}.
+
+The concentration parameter $\alpha_0$ is not exposed to the operator directly. Instead, the framework defines a single user-facing sensitivity parameter $\lambda \in [0, 1]$ and maps it monotonically to $\alpha_0$ such that $\lambda = 0$ recovers $\alpha_0 \to 0$ (the partition concentrates on a single cluster) and $\lambda = 1$ recovers $\alpha_0 \to \infty$ (the partition is permitted to grow up to $M$ distinct clusters). The mapping is specified in Section~\ref{subsec:fedge-lambda}. The role of $\lambda$ is to expose the three-way trade-off to the operator: $\lambda = 0$ recovers the convergence corner ($K = 1$), $\lambda = 1$ recovers the personalisation corner ($K = M$), and intermediate values position the system in the interior of the trade-off frontier.
+
+\subsection{Soft Edge-to-Model Membership}
+\label{subsec:fedge-soft}
+
+Each edge $e$ is associated at round $t$ with a probability vector over the family members,
+\begin{equation}
+\label{eq:soft-membership}
+\Pi_{e,\cdot}^{t} = \big( \Pi_{e,1}^{t}, \Pi_{e,2}^{t}, \ldots, \Pi_{e,K^{t}}^{t} \big), \qquad \sum_{k=1}^{K^{t}} \Pi_{e,k}^{t} = 1, \qquad \Pi_{e,k}^{t} \geq 0.
+\end{equation}
+The full $M \times K^t$ matrix $\Pi^t$ is the \emph{soft membership matrix} and is the central data structure of the framework. The term \emph{soft membership} is used here in its standard sense from mixture-model and federated-clustering literature \cite{ruan2022fedsoft, wu2024bayesian}: each edge holds a probability of belonging to each cluster, rather than being assigned to exactly one cluster. The soft formulation has been studied in flat, single-tier federated learning by Ruan and Joe-Wong \cite{ruan2022fedsoft} and by Wu, Imbiriba, and Closas \cite{wu2024bayesian}; the latter develops a Bayesian framework for the client-to-cluster association problem on a single-server topology, with experimental validation on label-skew partitions of Digits-Five, Fashion-MNIST, and CIFAR-10 at scales of approximately ten clients per cluster. Neither work addresses the two-level heterogeneity signal structure of the three-tier hierarchy, the edge-tier aggregation step, or the partial-participation setting that motivates Fedge. The complementary case, \emph{hard membership}, in which each edge is assigned to exactly one cluster, corresponds to the degenerate case in which every row of $\Pi^t$ has a single non-zero entry equal to one; this is the case in CFL \cite{sattler2020clustered} and IFCA \cite{ghosh2022efficient}.
+
+Two consequences follow from the soft formulation. First, an edge whose distribution lies between two clusters is not forced to commit to one, so the framework degrades gracefully when an edge sits near a cluster boundary. Second, when the participating clients at edge $e$ become scarce in round $t$ due to partial participation, the membership distribution redistributes weight to neighbouring clusters that still receive sufficient signal, providing robustness without requiring an explicit fallback rule.
+
+The model delivered to edge $e$ at the start of round $t+1$ is the membership-weighted blend
+\begin{equation}
+\label{eq:edge-blend}
+\tilde{w}_{e}^{t+1} = \sum_{k=1}^{K^{t}} \Pi_{e,k}^{t} \, w_{k}^{t}.
+\end{equation}
+Local training at edge $e$ proceeds from $\tilde{w}_{e}^{t+1}$, and the resulting update is used to revise both the family $\mathcal{W}$ and the membership matrix $\Pi$, as detailed in Section~\ref{sec:fedge-algorithm}.
+
+\subsection{Framework Properties}
+\label{subsec:fedge-properties}
+
+Three structural properties of the framework are stated explicitly before the algorithm is introduced.
+
+\paragraph{Subsumption of canonical HFL.}
+At $\lambda = 0$, the Dirichlet Process prior degenerates and the inference procedure produces $K^t = 1$ for all $t$, with $\Pi_{e,1}^{t} = 1$ for every edge. The blend reduces to a single global model, and the framework reduces to HierFAVG, or to MTGC if drift-correction terms are added. At $\lambda = 1$, the Dirichlet Process prior favours the maximum partition and produces $K^t = M$ for all $t$, with $\Pi^t = I_M$ (the identity matrix). The framework reduces to a per-edge personalised scheme of the PHE-FL or ESPerHFL family.
+
+\paragraph{Two-level signal coupling.}
+The intra-edge term $\zeta_{\text{intra}}^{2}(e)$ from Equation~\eqref{eq:zeta-intra} and the inter-edge term $\zeta_{\text{inter}}^{2}$ from Equation~\eqref{eq:zeta-inter} are both available at the cloud as measurable quantities derived from the edge updates. The inference procedure of Section~\ref{sec:fedge-algorithm} uses both signals jointly to drive the posterior over $K^t$ and $\Pi^t$. No prior elastic-$K$ method, including \cite{jaramillo2026dpmmcfl} and \cite{peng2025feddaa}, uses two-level signals, because both operate on flat topologies.
+
+\paragraph{Partial-participation compatibility.}
+The Dirichlet Process posterior is updated from the participating subset $\mathcal{S}_e^t$ rather than from $\mathcal{C}_e$, and the soft membership of Equation~\eqref{eq:soft-membership} is rescaled accordingly. The convergence analysis of Section~\ref{subsec:fedge-stab} characterises the dependence of the bound on $\rho_e^t$ explicitly.
+
+%----------------------------------------------------------------------
+\section{The Fedge Algorithm}
+\label{sec:fedge-algorithm}
+
+This section presents the Fedge algorithm, which realises the framework of Section~\ref{sec:fedge-framework} as a concrete inference-and-optimisation procedure. The algorithm is reactive: it observes the two-level heterogeneity signals at each cloud round and updates the family $\mathcal{W}^t$ and membership matrix $\Pi^t$ accordingly.
+
+\subsection{Two-Level Heterogeneity Signals}
+\label{subsec:fedge-signals}
+
+At each cloud round $t$, two scalar signals are computed from the available edge updates. The first is the intra-edge dispersion
+\begin{equation}
+\label{eq:intra-signal}
+\hat{\zeta}_{\text{intra}}^{2}(e, t) = \frac{1}{|\mathcal{S}_{e}^{t}|} \sum_{i \in \mathcal{S}_{e}^{t}} \big\| \Delta w_{i}^{t} - \Delta w_{e}^{t} \big\|^{2},
+\end{equation}
+where $\Delta w_i^t$ is the parameter update produced by client $i$ during round $t$ and $\Delta w_e^t$ is the mean update across the participating clients at edge $e$. This is the empirical estimator of $\zeta_{\text{intra}}^{2}(e)$ from Equation~\eqref{eq:zeta-intra} under partial participation. The second signal is the pairwise inter-edge dissimilarity between edges $e$ and $e'$,
+\begin{equation}
+\label{eq:inter-signal}
+\hat{d}^{2}(e, e', t) = \big\| \Delta w_{e}^{t} - \Delta w_{e'}^{t} \big\|^{2},
+\end{equation}
+which provides a measurable proxy for the inter-edge component of heterogeneity. Both signals are computed from quantities already available at the cloud after edge-tier aggregation, so no additional communication is required.
+
+The use of two signals rather than one is a structural difference from prior elastic-$K$ methods. DPMM-CFL \cite{jaramillo2026dpmmcfl} uses only client-level model distances. FedDAA \cite{peng2025feddaa} uses only prototype-based concept-drift signals. Neither method has access to a two-level hierarchy, and neither method's signal can distinguish intra-cluster from inter-cluster divergence. In Fedge, the two signals enter the inference procedure of Section~\ref{subsec:fedge-mh} as complementary inputs: $\hat{\zeta}_{\text{intra}}^{2}(e, t)$ controls whether the clients of an edge agree internally on cluster assignment, and $\hat{d}^{2}(e, e', t)$ controls whether two edges should remain in distinct clusters or be merged into one.
+
+\subsection{Split-Merge Moves}
+\label{subsec:fedge-mh}
+
+The cardinality $K^t$ of the family $\mathcal{W}^t$ and the membership matrix $\Pi^t$ are updated each round by a Metropolis--Hastings sampler over the partition structure of the $M$ edges, following the split-merge Markov chain Monte Carlo procedure of \cite{jain2004split} and adapted to the federated setting by \cite{jaramillo2026dpmmcfl}. Two reversible moves are proposed.
+
+\paragraph{Split move.}
+A split move is proposed when the intra-edge signal of one or more edges exceeds the inter-edge signal of the cluster currently containing those edges. The proposal selects a cluster $k$ and partitions its constituent edges into two subsets according to the leading eigenvector of the pairwise dissimilarity matrix restricted to that cluster. The proposal is accepted with the Metropolis--Hastings probability
+\begin{equation}
+\label{eq:mh-split}
+P_{\text{split}} = \min\!\left( 1, \; \frac{p(\mathcal{W}^{*}, \Pi^{*} \mid \text{data}, \alpha_0(\lambda))}{p(\mathcal{W}^{t}, \Pi^{t} \mid \text{data}, \alpha_0(\lambda))} \cdot \frac{q(\mathcal{W}^{t}, \Pi^{t} \mid \mathcal{W}^{*}, \Pi^{*})}{q(\mathcal{W}^{*}, \Pi^{*} \mid \mathcal{W}^{t}, \Pi^{t})} \right),
+\end{equation}
+where the asterisked quantities denote the proposed state and $q$ is the proposal distribution induced by the eigenvector partition. If accepted, $K^{t+1} = K^t + 1$ and the membership matrix is updated to reflect the new partition.
+
+\paragraph{Merge move.}
+A merge move is proposed when the pairwise inter-edge dissimilarity between two cluster centroids falls below a posterior-derived threshold that depends on $\alpha_0(\lambda)$ and the cluster sizes. The proposal merges the two clusters and assigns their union the centroid model. Acceptance follows the analogous Metropolis--Hastings rule; if accepted, $K^{t+1} = K^t - 1$.
+
+Both moves are reversible, so the sampler maintains detailed balance with respect to the Dirichlet Process posterior. The cardinality $K^t$ is observed to stabilise within a small number of rounds, after which neither move is accepted; this empirical behaviour is documented for the flat case by \cite{jaramillo2026dpmmcfl} and is exploited in the convergence analysis of Section~\ref{subsec:fedge-stab}.
+
+\subsection{Aggregation with Soft Membership}
+\label{subsec:fedge-agg}
+
+Once $K^t$ and $\Pi^t$ are updated, the family $\mathcal{W}^{t+1}$ is produced by membership-weighted aggregation. For each cluster $k$, the new global model is
+\begin{equation}
+\label{eq:agg}
+w_{k}^{t+1} = \frac{ \sum_{e=1}^{M} \Pi_{e,k}^{t} \, n_{e}^{t} \, w_{e}^{t+1} }{ \sum_{e=1}^{M} \Pi_{e,k}^{t} \, n_{e}^{t} },
+\end{equation}
+where $w_e^{t+1}$ is the model returned by edge $e$ after its edge-tier aggregation in round $t$, and $n_e^t = |\mathcal{S}_e^t|$ is the number of participating clients at edge $e$ in round $t$. The denominator is the cluster's effective sample size at round $t$. An edge contributes to the update of a cluster in proportion to its membership and its participating sample count; an edge with low membership in cluster $k$ contributes weakly, and an edge with no participating clients in round $t$ contributes zero.
+
+This is a generalisation of the HierFAVG aggregation \cite{liu2020hierfavg}: setting $K^t = 1$ and $\Pi_{e,1}^t = 1$ recovers the standard HierFAVG update. It is also a generalisation of hard-membership cluster aggregation \cite{sattler2020clustered, ghosh2022efficient}: setting $\Pi^t$ to a permutation matrix recovers hard cluster assignment. The soft formulation is what permits an edge to contribute to multiple clusters in proportion to its membership posterior, providing the graceful degradation property of Section~\ref{subsec:fedge-soft}.
+
+\subsection{The Sensitivity Parameter}
+\label{subsec:fedge-lambda}
+
+The single operator-facing parameter $\lambda \in [0, 1]$ controls the sensitivity of the algorithm to divergence in heterogeneity. Internally, $\lambda$ enters the Dirichlet Process concentration through the monotone mapping
+\begin{equation}
+\label{eq:lambda-map}
+\alpha_0(\lambda) = \alpha_{\min} \cdot \left( \frac{\alpha_{\max}}{\alpha_{\min}} \right)^{\lambda},
+\end{equation}
+where $\alpha_{\min}$ and $\alpha_{\max}$ are fixed framework constants chosen so that $\lambda = 0$ produces $K^t \to 1$ and $\lambda = 1$ produces $K^t \to M$ on representative non-IID partitions. The operator perceives $\lambda$ as a sensitivity dial: a small value of $\lambda$ favours fewer global models with stronger pooling across edges, and a large value of $\lambda$ favours more global models with stronger specialisation per edge.
+
+The behaviour of the algorithm along the three-way trade-off frontier is determined by $\lambda$. At $\lambda = 0$, the algorithm recovers MTGC-style single-model HFL, with the strongest convergence guarantee but no personalisation. At $\lambda = 1$, the algorithm recovers per-edge personalised HFL of the PHE-FL or ESPerHFL family, with full personalisation but weaker convergence and reduced robustness under low participation. Intermediate values of $\lambda$ produce intermediate values of $K^t$ chosen by the inference procedure to reflect the actual distributional structure of the federation.
+
+\subsection{Algorithm Pseudocode}
+\label{subsec:fedge-pseudocode}
+
+The Fedge algorithm is summarised as Algorithm~\ref{alg:fedge}. The procedure is invoked at the start of each cloud round and produces the family $\mathcal{W}^{t+1}$ and the membership matrix $\Pi^{t+1}$ to be used in the next round.
+
+\begin{algorithm}[!t]
+\caption{Fedge}
+\label{alg:fedge}
+\begin{algorithmic}[1]
+\Require Edges $\mathcal{E}$, sensitivity parameter $\lambda \in [0,1]$, total cloud rounds $T$, edge aggregation periods $E$, local SGD steps $\tau$, initial model $w_0$
+\Ensure Final family $\mathcal{W}^{T}$ and membership matrix $\Pi^{T}$
+\State Initialise $K^{0} \gets 1$, $\mathcal{W}^{0} \gets \{w_{0}\}$, $\Pi^{0} \gets \mathbf{1}_{M \times 1}$
+\State Set $\alpha_{0}(\lambda)$ from Equation~\eqref{eq:lambda-map}
+\For{$t = 0, 1, \ldots, T-1$}
+    \For{each edge $e \in \mathcal{E}$ \textbf{in parallel}}
+        \State Compute blended model $\tilde{w}_{e}^{t} \gets \sum_{k=1}^{K^{t}} \Pi_{e,k}^{t} \, w_{k}^{t}$
+        \State Sample participating clients $\mathcal{S}_{e}^{t} \subseteq \mathcal{C}_{e}$
+        \For{each edge aggregation period $1, \ldots, E$}
+            \For{each client $i \in \mathcal{S}_{e}^{t}$ \textbf{in parallel}}
+                \State Perform $\tau$ steps of local SGD from current edge model
+            \EndFor
+            \State Edge aggregates client updates and produces $w_{e}^{t+1}$
+        \EndFor
+        \State Return $w_{e}^{t+1}$ and per-client updates $\{\Delta w_{i}^{t}\}_{i \in \mathcal{S}_{e}^{t}}$ to the cloud
+    \EndFor
+    \State Compute intra-edge signals $\hat{\zeta}_{\text{intra}}^{2}(e, t)$ from Equation~\eqref{eq:intra-signal} for all $e$
+    \State Compute pairwise inter-edge signals $\hat{d}^{2}(e, e', t)$ from Equation~\eqref{eq:inter-signal} for all $e, e'$
+    \State Propose split-merge moves and accept according to Equation~\eqref{eq:mh-split}
+    \State Update partition cardinality $K^{t+1}$ and membership matrix $\Pi^{t+1}$
+    \For{each cluster $k = 1, \ldots, K^{t+1}$}
+        \State Compute $w_{k}^{t+1}$ by membership-weighted aggregation, Equation~\eqref{eq:agg}
+    \EndFor
+    \State Set $\mathcal{W}^{t+1} \gets \{w_{1}^{t+1}, \ldots, w_{K^{t+1}}^{t+1}\}$
+\EndFor
+\State \Return $\mathcal{W}^{T}$, $\Pi^{T}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Computational and Communication Cost}
+\label{subsec:fedge-cost}
+
+This subsection formalises the per-round and total training cost of the Fedge algorithm and compares it against the canonical HFL baselines reviewed in Section~\ref{subsec:fedge-tradeoff}.
+
+\paragraph{Notation.}
+Let $|w|$ denote the number of parameters of a single model and $b$ the number of bits per parameter (typically $b = 32$ for single-precision floating point). For simplicity of exposition, the comparison assumes a uniform number of clients per edge $|\mathcal{C}_e| = C$ and a uniform participation rate $\rho_e^t = \rho$; the analysis generalises directly to non-uniform settings by substituting the corresponding sums. One cloud round consists of $E$ edge aggregation periods, and each edge aggregation period consists of one client--edge exchange in which each participating client uploads its update to its edge server and the edge sends the aggregated model back.
+
+\paragraph{Per-round upload cost.}
+The per-round upload cost of HierFAVG is
+\begin{equation}
+\label{eq:cost-hierfavg-up}
+U_{\text{HierFAVG}}^{t} = b \cdot |w| \cdot M \cdot \left( 1 + E \rho C \right),
+\end{equation}
+accounting for $E \rho C$ client uploads per edge across the $E$ edge aggregation periods plus one edge upload to the cloud, summed across the $M$ edges. The per-round upload cost of Fedge is
+\begin{equation}
+\label{eq:cost-fedge-up}
+U_{\text{Fedge}}^{t} = b \cdot |w| \cdot M \cdot \left( 1 + E \rho C \right) + b \cdot M,
+\end{equation}
+where the additive term $b \cdot M$ accounts for the transmission of one intra-edge dispersion scalar per edge from Equation~\eqref{eq:intra-signal}. Since $|w| \gg 1$ for any modern neural network, the additive term is negligible and
+\begin{equation}
+\label{eq:cost-fedge-approx}
+U_{\text{Fedge}}^{t} = U_{\text{HierFAVG}}^{t} \cdot \left( 1 + \frac{1}{|w| \left(1 + E \rho C\right)} \right) \approx U_{\text{HierFAVG}}^{t}.
+\end{equation}
+By contrast, the worst-case per-round upload cost of MTGC is
+\begin{equation}
+\label{eq:cost-mtgc-up}
+U_{\text{MTGC}}^{t} = 2 \cdot b \cdot |w| \cdot M \cdot \left( 1 + E \rho C \right) = 2 \cdot U_{\text{HierFAVG}}^{t},
+\end{equation}
+because each client--edge and edge--cloud transmission carries a control variate of equal dimensionality to the model in the worst case. Fang \emph{et al.} argue that this overhead can be reduced in practice by estimating control variates from model differences rather than transmitting them explicitly \cite{fang2024hierarchical}, but the dimensionality of the control state remains a function of the model size, and the controls require persistent per-client and per-edge storage across rounds. Fedge avoids the question of control-variate overhead entirely: the inter-cluster heterogeneity reduction is achieved through the soft membership matrix $\Pi^{t}$ and the model family $\mathcal{W}^{t}$, both of which are stored at the cloud and never transmitted. The per-round upload cost of ESPerHFL \cite{ma2024personalized} and PHE-FL \cite{lee2025phefl} matches that of HierFAVG at the edge--cloud step, because each edge transmits a single aggregated model to the cloud; however, ESPerHFL additionally exchanges per-client personalisation parameters (the local model, the mixing weight, and normalisation parameters) at the client--edge step in every iteration, inflating the client--edge cost above that of HierFAVG.
+
+\paragraph{Per-round download cost.}
+The per-round download cost of HierFAVG, ESPerHFL, and Fedge is
+\begin{equation}
+\label{eq:cost-hierfavg-down}
+D_{\text{HierFAVG}}^{t} = D_{\text{ESPerHFL}}^{t} = D_{\text{Fedge}}^{t} = b \cdot |w| \cdot M \cdot \left( 1 + E \rho C \right),
+\end{equation}
+with the blended model $\tilde{w}_e^t$ delivered to each edge in Fedge having the same dimensionality as a single model, since the blend of Equation~\eqref{eq:edge-blend} is computed at the cloud before transmission. PHE-FL incurs an additional download per cloud round for the complement model:
+\begin{equation}
+\label{eq:cost-phefl-down}
+D_{\text{PHE-FL}}^{t} = b \cdot |w| \cdot M \cdot \left( 2 + E \rho C \right).
+\end{equation}
+MTGC doubles the download cost for the same reason as upload:
+\begin{equation}
+\label{eq:cost-mtgc-down}
+D_{\text{MTGC}}^{t} = 2 \cdot b \cdot |w| \cdot M \cdot \left( 1 + E \rho C \right).
+\end{equation}
+
+\paragraph{Per-round cloud computational cost.}
+The per-round cloud-side computational cost of HierFAVG, MTGC, ESPerHFL, and PHE-FL is dominated by the weighted aggregation of $M$ models, which is $O(M \cdot |w|)$ floating-point operations. The per-round cloud-side computational cost of Fedge has three components: the inter-edge signal computation in $O(M^{2} \cdot |w|)$, the split-merge proposal in $O(M^{2} \cdot |w|)$ dominated by the eigenvector computation in a split move, and the membership-weighted aggregation in $O(K^{t} \cdot M \cdot |w|)$. Since $K^{t} \leq M$, the total reduces to
+\begin{equation}
+\label{eq:cost-fedge-compute}
+\mathcal{F}_{\text{Fedge}}^{t} = O\!\left( M^{2} \cdot |w| \right).
+\end{equation}
+The overhead factor relative to HierFAVG is $M$, which is meaningful but bounded by the number of edges; for the typical deployment scale of $M \leq 20$ assumed in this chapter, the absolute cost remains modest compared with the cost of model transmission.
+
+\paragraph{Total training cost.}
+The total bits transmitted over $T$ cloud rounds to reach a target accuracy $\epsilon$ is
+\begin{equation}
+\label{eq:cost-total}
+\mathcal{B}(\epsilon) = T(\epsilon) \cdot \left( U^{t} + D^{t} \right),
+\end{equation}
+where $T(\epsilon)$ is the number of cloud rounds required by the algorithm to reach $\epsilon$. The dependence of $T(\epsilon)$ on the system parameters is established by the convergence analysis presented later in this chapter; for fixed $T$, the per-algorithm upload and download expressions of Equations~\eqref{eq:cost-fedge-up} to \eqref{eq:cost-mtgc-down} provide the per-round multiplier.
+
+\paragraph{Comparison summary.}
+Table~\ref{tab:fedge-cost} consolidates the per-round upload, download, cloud computational cost, and the relative total-bits multiplier against HierFAVG for the five algorithms considered. The Fedge algorithm preserves the communication cost of HierFAVG up to the negligible scalar overhead of Equation~\eqref{eq:cost-fedge-approx}, avoids the per-client control-variate storage required by MTGC and the per-client personalisation parameters exchanged by ESPerHFL, and incurs an $M$-fold cloud computational overhead relative to HierFAVG arising from the split-merge inference procedure. The cloud computational overhead is bounded by the number of edges $M$ rather than by the number of clients $N$, which is the relevant property for cross-device deployments in which $N \gg M$.
+
+\begin{table*}[!t]
+\centering
+\caption{Per-round cost comparison for the Fedge algorithm against four hierarchical federated learning baselines. Notation as in Section~\ref{subsec:fedge-cost}. The relative total-bits multiplier is the ratio of total transmitted bits relative to HierFAVG under the same number of cloud rounds $T$. The MTGC upload and download figures are worst-case; Fang \emph{et al.} \cite{fang2024hierarchical} note that control variates can be estimated from model differences with reduced transmission cost at the price of persistent per-client and per-edge storage. The ESPerHFL row reports edge--cloud cost; client--edge cost is higher due to per-client personalisation parameters.}
+\label{tab:fedge-cost}
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{6pt}
+\footnotesize
+\begin{tabular}{l c c c c}
+\toprule
+\textbf{Algorithm} & \textbf{Per-round upload} & \textbf{Per-round download} & \textbf{Cloud compute} & \textbf{Total-bits} \\
+                   & \textbf{(bits)}            & \textbf{(bits)}              & \textbf{(flops)}        & \textbf{vs HierFAVG} \\
+\midrule
+HierFAVG \cite{liu2020hierfavg} &
+$b |w| M (1 + E \rho C)$ &
+$b |w| M (1 + E \rho C)$ &
+$O(M |w|)$ &
+$1$ \\
+MTGC \cite{fang2024hierarchical} &
+$2 b |w| M (1 + E \rho C)$ &
+$2 b |w| M (1 + E \rho C)$ &
+$O(M |w|)$ &
+$2$ \\
+ESPerHFL \cite{ma2024personalized} &
+$b |w| M (1 + E \rho C)$ &
+$b |w| M (1 + E \rho C)$ &
+$O(M |w|)$ &
+$1$ \\
+PHE-FL \cite{lee2025phefl} &
+$b |w| M (1 + E \rho C)$ &
+$b |w| M (2 + E \rho C)$ &
+$O(M |w|)$ &
+$1 + \tfrac{1}{2(1 + E \rho C)}$ \\
+\textbf{Fedge} &
+$b |w| M (1 + E \rho C) + bM$ &
+$b |w| M (1 + E \rho C)$ &
+$O(M^{2} |w|)$ &
+$\approx 1$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+%----------------------------------------------------------------------
+\section{Convergence Analysis}
+\label{sec:fedge-convergence}
+
+This section establishes the convergence guarantee of the Fedge algorithm. The analysis is conducted under standard non-convex federated learning assumptions extended with two additional assumptions specific to the framework: bounded two-level heterogeneity and stabilisation of the cluster count. The main result, Theorem~\ref{thm:fedge-convergence}, bounds the average squared gradient norm of the per-cluster objective after a warm-up period during which the inference procedure of Section~\ref{subsec:fedge-mh} stabilises. The bound exposes three terms with distinct interpretations and recovers the canonical single-model and per-edge personalised bounds as boundary cases at $\lambda = 0$ and $\lambda = 1$ respectively. A proof sketch is provided in Section~\ref{subsec:fedge-proof-sketch}; the full proof is deferred to Appendix~\ref{AppendixA}.
+
+\subsection{Assumptions}
+\label{subsec:fedge-assumptions}
+
+Five assumptions are required for the analysis. The first three are standard in the non-convex federated learning literature \cite{karimireddy2020scaffold, fang2024hierarchical, jiang2024partial}. The fourth and fifth are specific to the Fedge framework.
+
+\paragraph{A1 ($L$-smoothness).}
+Each local loss function $F_i$ is differentiable and its gradient is $L$-Lipschitz continuous:
+\begin{equation}
+\label{eq:asm-smooth}
+\big\| \nabla F_i(w) - \nabla F_i(w') \big\| \leq L \, \| w - w' \|, \qquad \forall w, w' \in \mathbb{R}^{|w|}, \quad \forall i.
+\end{equation}
+
+\paragraph{A2 (Bounded stochastic-gradient variance).}
+The stochastic gradient computed by client $i$ on a mini-batch $\xi$ is an unbiased estimator of $\nabla F_i$, with variance bounded uniformly by $\sigma^2$:
+\begin{equation}
+\label{eq:asm-var}
+\mathbb{E}_\xi \big[ \nabla F_i(w; \xi) \big] = \nabla F_i(w), \qquad \mathbb{E}_\xi \big\| \nabla F_i(w; \xi) - \nabla F_i(w) \big\|^2 \leq \sigma^2.
+\end{equation}
+
+\paragraph{A3 (Bounded two-level heterogeneity).}
+The intra-edge and inter-edge gradient dissimilarity terms of Equations~\eqref{eq:zeta-intra} and~\eqref{eq:zeta-inter} are bounded uniformly in $w$:
+\begin{equation}
+\label{eq:asm-het}
+\zeta_{\text{intra}}^{2}(e) \leq G_{\text{intra}}^{2}, \qquad \zeta_{\text{inter}}^{2} \leq G_{\text{inter}}^{2}, \qquad \forall e, \quad \forall w.
+\end{equation}
+
+\paragraph{A4 (Cluster-quality factor).}
+After cluster stabilisation, the average per-cluster heterogeneity is at most a factor $\gamma$ of the inter-edge heterogeneity:
+\begin{equation}
+\label{eq:asm-gamma}
+\frac{1}{K^{*}} \sum_{k=1}^{K^{*}} \zeta_{k}^{2} \leq \gamma \, G_{\text{inter}}^{2}, \qquad \gamma \in (0, 1],
+\end{equation}
+where $\zeta_{k}^{2}$ is the gradient dissimilarity between edges sharing membership in cluster $k$, and $\gamma$ is the cluster-quality factor. The assumption states that clustering reduces effective inter-edge heterogeneity by a factor of at least $\gamma$. The factor $\gamma$ depends on the partition produced by the inference procedure: a well-separated partition yields a small $\gamma$, and an unstructured federation yields $\gamma$ close to one.
+
+\paragraph{A5 (Stabilisation of $K^t$).}
+There exists a warm-up round $T_{0} \in \mathbb{N}$ such that the cluster count is constant at a value $K^{*}$ for all subsequent rounds:
+\begin{equation}
+\label{eq:asm-stab}
+K^{t} = K^{*}, \qquad \forall t \geq T_{0}.
+\end{equation}
+The assumption is justified empirically by the stabilisation behaviour of split-merge Markov chain Monte Carlo inference under Dirichlet Process priors reported by \cite{jaramillo2026dpmmcfl} in the flat clustered federated learning setting; the same behaviour is observed in the experiments of Section~\ref{sec:fedge-framework}, where $T_{0}$ is measured directly.
+
+\subsection{Stabilisation Window}
+\label{subsec:fedge-stab}
+
+The convergence theorem of Section~\ref{subsec:fedge-theorem} bounds the optimisation error from round $T_{0}$ onward rather than from round zero. The treatment of the warm-up window is consistent with the practice in clustered federated learning analyses \cite{sattler2020clustered, jaramillo2026dpmmcfl}, where the partition inference is treated as a separate phase from the per-cluster optimisation. During the warm-up, the family $\mathcal{W}^{t}$ is shaped by the split-merge proposals of Section~\ref{subsec:fedge-mh}, and the soft membership matrix $\Pi^{t}$ is updated each round. After $T_{0}$, the partition is fixed and the optimisation reduces to $K^{*}$ parallel per-cluster federated learning problems coupled only through the soft membership weights of edges that lie between clusters.
+
+The value of $T_{0}$ is not bounded analytically in this chapter, as such a bound requires assumptions on the geometry of the parameter space at initialisation that cannot be verified for arbitrary neural-network architectures. The empirical value of $T_{0}$ is reported in Section~\ref{sec:fedge-experiments}.
+
+\subsection{Main Convergence Theorem}
+\label{subsec:fedge-theorem}
+
+The main theoretical result of the chapter is stated as follows.
+
+\begin{theorem}[Fedge convergence]
+\label{thm:fedge-convergence}
+Under Assumptions A1--A5, let the local step size satisfy $\eta = \mathcal{O}\!\left( 1 / (L\sqrt{(T - T_{0}) \bar{\rho} C} \,) \right)$, where $\bar{\rho} = \frac{1}{M}\sum_{e=1}^{M} \rho_{e}$ is the average per-edge participation rate. Then the iterates of the Fedge algorithm satisfy
+\begin{equation}
+\label{eq:main-bound}
+\frac{1}{T - T_{0}} \sum_{t = T_{0}}^{T-1} \frac{1}{K^{*}} \sum_{k=1}^{K^{*}} \mathbb{E} \big\| \nabla F_{k}(w_{k}^{t}) \big\|^{2}
+\;\leq\;
+\underbrace{\mathcal{O}\!\left( \frac{L \Delta_{0} + \sigma^{2}}{\sqrt{(T - T_{0}) \, \bar{\rho} \, C}} \right)}_{\text{(i) optimisation noise}}
+\;+\;
+\underbrace{\mathcal{O}\!\left( \frac{\gamma \, G_{\text{inter}}^{2}}{K^{*}} \right)}_{\text{(ii) inter-cluster residual}}
+\;+\;
+\underbrace{\mathcal{O}\!\left( \frac{G_{\text{intra}}^{2}}{\bar{\rho} \, C} \right)}_{\text{(iii) intra-edge residual}},
+\end{equation}
+where $F_{k}$ denotes the loss of cluster $k$ and $\Delta_{0} = F(w^{T_{0}}) - F^{*}$ is the sub-optimality at the end of the warm-up window.
+\end{theorem}
+
+The bound contains three terms, each with a distinct interpretation. Term~(i) is the standard non-convex federated learning optimisation rate, decreasing as $1/\sqrt{T - T_{0}}$ with the total post-warm-up rounds and improving with average participation $\bar{\rho}$ and clients per edge $C$. Term~(ii) is the residual heterogeneity that survives after clustering: it shrinks as the cluster count $K^{*}$ grows, and is scaled by the cluster-quality factor $\gamma$ from Assumption A4. Term~(iii) is the irreducible intra-edge heterogeneity that clustering cannot reduce, since clusters are formed across edges rather than across clients within an edge.
+
+The structure of the bound makes the role of clustering explicit. Single-model HFL, such as HierFAVG \cite{liu2020hierfavg} and MTGC \cite{fang2024hierarchical} in its non-control-variate form, corresponds to $K^{*} = 1$, in which case term~(ii) reduces to $\mathcal{O}(\gamma G_{\text{inter}}^{2})$ with no reduction. Per-edge personalised HFL, such as PHE-FL \cite{lee2025phefl} and ESPerHFL \cite{ma2024personalized}, corresponds to $K^{*} = M$, in which case term~(ii) is divided by $M$. Fedge selects $K^{*}$ from the data, and the bound is minimised when $K^{*}$ is large enough to drive term~(ii) below term~(iii) but not so large that term~(i) inflates due to small per-cluster sample sizes.
+
+\subsection{Proof Sketch}
+\label{subsec:fedge-proof-sketch}
+
+The proof of Theorem~\ref{thm:fedge-convergence} proceeds in four steps. The full derivation is given in Appendix~\ref{AppendixA}; this subsection states the four steps and identifies the technical novelty relative to existing HFL convergence proofs.
+
+\paragraph{Step 1: One-step descent inequality.}
+By Assumption A1, $L$-smoothness of $F_{k}$ yields the standard descent inequality
+\begin{equation}
+\label{eq:proof-step1}
+\mathbb{E} \big[ F_{k}(w_{k}^{t+1}) \big] \;\leq\; F_{k}(w_{k}^{t}) - \eta \, \mathbb{E} \big\langle \nabla F_{k}(w_{k}^{t}), \, \tilde{g}_{k}^{t} \big\rangle + \frac{L \eta^{2}}{2} \, \mathbb{E} \big\| \tilde{g}_{k}^{t} \big\|^{2},
+\end{equation}
+where $\tilde{g}_{k}^{t}$ is the aggregated update applied to cluster $k$ at round $t$. This step is standard \cite{karimireddy2020scaffold}.
+
+\paragraph{Step 2: Bound on local-update drift.}
+The drift of the local SGD iterates from the blended model $\tilde{w}_{e}^{t}$ is bounded using Assumptions A1, A2, and A3. The drift bound takes the form
+\begin{equation}
+\label{eq:proof-step2}
+\mathbb{E} \big\| w_{i, s}^{t} - \tilde{w}_{e}^{t} \big\|^{2} \;\leq\; \mathcal{O}\!\left( \eta^{2} \tau^{2} \big( \sigma^{2} + G_{\text{intra}}^{2} \big) \right), \qquad s = 1, \ldots, \tau,
+\end{equation}
+for the local iterates of client $i \in \mathcal{S}_{e}^{t}$. This step follows the SCAFFOLD-style analysis of \cite{karimireddy2020scaffold} adapted to the hierarchical setting of \cite{fang2024hierarchical, jiang2024partial}.
+
+\paragraph{Step 3: Variance of the membership-weighted aggregate.}
+This is the step in which the analysis differs structurally from prior HFL proofs. The aggregated update $\tilde{g}_{k}^{t}$ for cluster $k$ is a membership-weighted sum of edge updates:
+\begin{equation}
+\label{eq:proof-step3a}
+\tilde{g}_{k}^{t} \;=\; \frac{ \sum_{e=1}^{M} \Pi_{e,k}^{t} \, n_{e}^{t} \, \Delta w_{e}^{t} }{ \sum_{e=1}^{M} \Pi_{e,k}^{t} \, n_{e}^{t} }.
+\end{equation}
+The variance of $\tilde{g}_{k}^{t}$ decomposes into three contributions: stochastic gradient noise, intra-edge heterogeneity, and inter-edge heterogeneity restricted to the support of column $k$ of $\Pi^{t}$. After applying Assumption A4 to bound the inter-edge component on the support, the variance bound reads
+\begin{equation}
+\label{eq:proof-step3b}
+\mathbb{E} \big\| \tilde{g}_{k}^{t} - \nabla F_{k}(w_{k}^{t}) \big\|^{2} \;\leq\; \mathcal{O}\!\left( \frac{\sigma^{2}}{\bar{\rho} C} + \frac{G_{\text{intra}}^{2}}{\bar{\rho} C} + \frac{\gamma G_{\text{inter}}^{2}}{K^{*}} \right).
+\end{equation}
+The factor $1/K^{*}$ in the inter-cluster term emerges from the restriction of $\Pi^{t}$ to a single column: under Assumption A4, the average heterogeneity within a cluster is at most $\gamma G_{\text{inter}}^{2}$, and the bound on the per-cluster variance follows by Jensen's inequality applied to the column-wise sum. The full derivation is given in Appendix~\ref{AppendixA}, Section~\ref{appendix:variance}.
+
+\paragraph{Step 4: Telescoping over $T - T_{0}$ rounds.}
+Substituting Equations~\eqref{eq:proof-step2} and~\eqref{eq:proof-step3b} into Equation~\eqref{eq:proof-step1}, telescoping the descent inequality from $t = T_{0}$ to $t = T - 1$, choosing the step size $\eta = \mathcal{O}(1 / (L \sqrt{(T - T_{0}) \bar{\rho} C}))$, and averaging over rounds and clusters yields Equation~\eqref{eq:main-bound}. This step is standard once the variance bound of step 3 is established.
+
+The technical contribution of the proof lies in step 3, where the soft membership matrix $\Pi^{t}$ enters the variance decomposition. No prior HFL convergence proof treats a soft membership structure, since prior elastic-cluster methods \cite{jaramillo2026dpmmcfl, peng2025feddaa} use hard assignment, and prior soft-mixing methods \cite{lee2025phefl, ma2024personalized} use fixed $K = M$. The bound of Equation~\eqref{eq:proof-step3b} is therefore new.
+
+\subsection{Implications for the Three-Way Trade-off}
+\label{subsec:fedge-implications}
+
+Three corollaries follow directly from Theorem~\ref{thm:fedge-convergence}. Each corresponds to one of the boundary cases identified in Section~\ref{subsec:fedge-tradeoff} and quantifies the position of the corresponding HFL family on the trade-off frontier.
+
+\begin{corollary}[Convergence corner, $\lambda = 0$]
+\label{cor:convergence-corner}
+At $\lambda = 0$, the Fedge algorithm produces $K^{*} = 1$ almost surely. The bound of Equation~\eqref{eq:main-bound} reduces to
+\begin{equation}
+\label{eq:corollary-lambda-0}
+\frac{1}{T - T_{0}} \sum_{t = T_{0}}^{T-1} \mathbb{E} \big\| \nabla F(w^{t}) \big\|^{2} \;\leq\; \mathcal{O}\!\left( \frac{L \Delta_{0} + \sigma^{2}}{\sqrt{(T - T_{0}) \bar{\rho} C}} \right) + \mathcal{O}\!\left( \gamma G_{\text{inter}}^{2} + \frac{G_{\text{intra}}^{2}}{\bar{\rho} C} \right),
+\end{equation}
+which matches the standard HierFAVG bound of \cite{liu2020hierfavg} and \cite{jiang2024partial} up to constants. Personalisation is zero, and convergence is governed by the un-reduced two-level heterogeneity.
+\end{corollary}
+
+\begin{corollary}[Personalisation corner, $\lambda = 1$]
+\label{cor:personalisation-corner}
+At $\lambda = 1$, the Fedge algorithm produces $K^{*} = M$ almost surely, with $\Pi^{t} = I_{M}$. Term~(ii) of Equation~\eqref{eq:main-bound} reduces to $\mathcal{O}(\gamma G_{\text{inter}}^{2} / M)$, and per-edge participating samples drop to $\rho_{e} C$ for each cluster. The bound becomes
+\begin{equation}
+\label{eq:corollary-lambda-1}
+\frac{1}{T - T_{0}} \sum_{t = T_{0}}^{T-1} \frac{1}{M} \sum_{e=1}^{M} \mathbb{E} \big\| \nabla F_{e}(w_{e}^{t}) \big\|^{2} \;\leq\; \mathcal{O}\!\left( \frac{L \Delta_{0} + \sigma^{2}}{\sqrt{(T - T_{0}) \bar{\rho} C}} \right) + \mathcal{O}\!\left( \frac{\gamma G_{\text{inter}}^{2}}{M} + \frac{G_{\text{intra}}^{2}}{\bar{\rho} C} \right).
+\end{equation}
+The inter-cluster residual is at its minimum but the optimisation noise term receives no benefit from cluster pooling, exposing the personalisation-versus-robustness tension.
+\end{corollary}
+
+\begin{corollary}[Interior regime, $0 < \lambda < 1$]
+\label{cor:interior}
+For $\lambda \in (0, 1)$, the cluster count $K^{*}$ takes an intermediate value determined by Assumption A4 and the inference procedure of Section~\ref{subsec:fedge-mh}. The bound of Equation~\eqref{eq:main-bound} is minimised at the value of $K^{*}$ at which the marginal reduction in term~(ii) equals the marginal cost in terms~(i) and~(iii). Explicit calculation gives
+\begin{equation}
+\label{eq:corollary-optimal-K}
+K^{*}_{\text{opt}} \;=\; \Theta\!\left( \frac{\gamma G_{\text{inter}}^{2} \cdot \bar{\rho} C}{L \Delta_{0} + \sigma^{2} + G_{\text{intra}}^{2}} \right)^{1/2},
+\end{equation}
+up to constants depending on the constants hidden in the $\mathcal{O}$ notation of Equation~\eqref{eq:main-bound}.
+\end{corollary}
+
+The interior corollary establishes that the optimal cluster count is not the maximum $M$ but an intermediate value that balances the three terms of the bound. The optimal $K^{*}$ grows with the inter-edge heterogeneity $G_{\text{inter}}^{2}$ and with the average participation $\bar{\rho} C$, and shrinks with the optimisation noise and the intra-edge heterogeneity. The result is consistent with the empirical observation that fixed-$K$ clustering methods such as CHPFL \cite{song2025chpfl} require $K$ to be tuned to the data; the Fedge inference procedure selects $K^{*}$ automatically, with the sensitivity parameter $\lambda$ providing the operator with control over the trade-off position. The empirical validity of the prediction of Equation~\eqref{eq:corollary-optimal-K} is examined in Section~\ref{sec:fedge-experiments}.
+
+%----------------------------------------------------------------------
+
+% Sections 3.5 (Experimental Evaluation),
+% 3.6 (Towards Proactive Fedge), and 3.7 (Chapter Summary) follow.
